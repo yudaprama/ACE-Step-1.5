@@ -2,12 +2,12 @@ name: Build and Push Container Image
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag:
-        description: "Image tag override (default: git tag or sha)"
+        description: "Image tag override"
         required: false
 
 env:
@@ -20,10 +20,36 @@ jobs:
     permissions:
       contents: read
       packages: write
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate next tag
+        id: tag
+        run: |
+          # Get latest semver tag, default to v0.0.0 if none
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -n1 || echo "v0.0.0")
+          LATEST=${LATEST:-v0.0.0}
+          # Strip -api suffix if present
+          LATEST=${LATEST%-api}
+          # Bump patch version
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST#v}"
+          PATCH=$((PATCH + 1))
+          NEXT="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Latest: $LATEST -> Next: $NEXT"
+          echo "tag=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag ${{ steps.tag.outputs.tag }}
+          git push origin ${{ steps.tag.outputs.tag }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -41,20 +67,15 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # For tagged releases: v0.1.8 -> 0.1.8, latest
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            # For workflow_dispatch with custom tag
+            type=semver,pattern={{version}},suffix=-api,value=${{ steps.tag.outputs.tag }}
+            type=raw,value=api
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
-            # Fallback: short SHA
-            type=sha,prefix=
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile.api
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
